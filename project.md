@@ -33,6 +33,7 @@ The system behaves like a **trading analyst + assistant**, not an automated trad
   - symbols to watch (stocks, ETFs, futures)
   - types of trends to identify (breakout, reversal, momentum, range break, etc.)
   - sensitivity or thresholds
+- The system must support configuring and inspecting current intent (symbols/thresholds) so you can verify what is actively being monitored.
 - The LLM may help interpret vague intent (e.g. *“watch QQQ for weakness”*).
 
 ---
@@ -171,7 +172,6 @@ The system functions as an **LLM-powered trading assistant**:
 - prepares structured, reviewable trade drafts
 
 Safe, auditable, and extensible by design.
-
 
 
 
