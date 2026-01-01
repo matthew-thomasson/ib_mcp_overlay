@@ -1,0 +1,8 @@
+# Docker Compose override file for IB_MCP customizations
+# This file extends the base docker-compose.yml from the upstream IB_MCP repository
+# Add your service customizations, volume mounts, and environment overrides here
+
+version: '3.8'
+
+services:
+  # Add service overrides here as needed
