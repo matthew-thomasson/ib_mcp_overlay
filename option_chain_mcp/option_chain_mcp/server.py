@@ -247,6 +247,31 @@ class OptionChainMCP:
         )
 
     def _register_tools(self) -> None:
+        @self.mcp.tool(description="Check whether the MCP can connect read-only to IB Gateway or TWS.")
+        async def check_ibkr_connection() -> dict[str, Any]:
+            try:
+                await self._ensure_connected()
+                accounts = await _maybe_await(self.ib.managedAccounts())
+                server_version = getattr(self.ib.client, "serverVersion", lambda: None)()
+                return {
+                    "connected": self.ib.isConnected(),
+                    "host": self.host,
+                    "port": self.port,
+                    "client_id": self.client_id,
+                    "readonly": True,
+                    "server_version": server_version,
+                    "managed_accounts": list(accounts or []),
+                }
+            except Exception as exc:
+                return {
+                    "connected": False,
+                    "host": self.host,
+                    "port": self.port,
+                    "client_id": self.client_id,
+                    "readonly": True,
+                    "error": str(exc),
+                }
+
         @self.mcp.tool(description="List available option expirations and strike ranges for a stock ticker.")
         async def get_option_chain_summary(
             symbol: Annotated[str, "Stock ticker, for example AAPL or MSFT"],
