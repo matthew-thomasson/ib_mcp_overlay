@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "option-chain-mcp": {
+      "type": "http",
+      "url": "http://localhost:8010/mcp",
+      "trust": true
+    }
+  }
+}
