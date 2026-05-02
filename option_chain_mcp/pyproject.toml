@@ -1,0 +1,17 @@
+[project]
+name = "option-chain-mcp"
+version = "0.1.0"
+description = "Read-only MCP server for Interactive Brokers option chain prices"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.0.0",
+    "ib_async>=2.0.1",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+option-chain-mcp = "option_chain_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

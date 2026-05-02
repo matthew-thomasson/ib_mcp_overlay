@@ -1,130 +1,81 @@
-# IB_MCP Overlay
+# IB MCP Overlay
 
-This repository provides a customization layer for the [IB_MCP](https://github.com/rcontesti/IB_MCP) project without forking it. It uses Docker Compose's override functionality to extend the base IB_MCP setup with additional services and configurations.
+This overlay contains local additions for running Interactive Brokers MCP services without forking upstream MCP projects.
 
-## Architecture
+## Option Chain MCP
 
-This overlay adds:
-- **Price Poller**: Real-time market data monitoring and trigger logic
-- **LangGraph API**: AI-powered trading workflow orchestration
-- **Custom Configurations**: Environment-specific overrides via `docker-compose.override.yml`
+`option_chain_mcp` is a read-only MCP server that connects to IB Gateway or TWS through the TWS API using `ib_async`. It exposes tools for AI clients to query option-chain metadata and option price snapshots for stock tickers.
 
-## Prerequisites
+### Tools
 
-- Docker and Docker Compose installed on your system
-- Git
-- Access to Interactive Brokers (TWS or IB Gateway)
-- (Optional) Claude AI API key for LangGraph functionality
+- `get_option_chain_summary`: returns available expirations, strike count, strike range, chain exchange, trading class, and multiplier.
+- `get_option_chain_prices`: returns capped option quote snapshots with bid, ask, last, close, mark, midpoint, implied volatility, and model greeks when IBKR provides them.
 
-## Setup Instructions
+The server does not expose order-placement tools.
 
-### 1. Clone the Upstream IB_MCP Repository
+### IBKR Setup
 
-```bash
-git clone https://github.com/rcontesti/IB_MCP.git
-```
+In TWS or IB Gateway:
 
-### 2. Clone This Overlay Repository
+1. Enable `ActiveX and Socket Clients`.
+2. Add `127.0.0.1` as a trusted IP if connecting locally.
+3. Use the correct API port:
+   - TWS paper: `7497`
+   - TWS live: `7496`
+   - IB Gateway paper: often `4002`
+   - IB Gateway live: often `4001`
 
-```bash
-git clone https://github.com/matthew-thomasson/ib_mcp_overlay.git
-```
+You must have the relevant options and market-data permissions in your IBKR account. If live prices are unavailable, call `get_option_chain_prices` with `market_data_type=3` for delayed data.
 
-Your directory structure should look like:
-```
-parent-folder/
-├── IB_MCP/                    # Upstream repository
-└── ib_mcp_overlay/            # This overlay repository
-```
+### Run With Docker Compose
 
-### 3. Start the Stack
-
-Use Docker Compose to combine both configuration files:
+Copy the example environment file and edit ports if needed:
 
 ```bash
-docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml up -d --build
+cp .env.example .env
 ```
 
-This command:
-- Uses the base configuration from `IB_MCP/docker-compose.yml`
-- Applies customizations from `ib_mcp_overlay/docker-compose.override.yml`
-- Builds images and starts containers in detached mode
-
-### 4. View Logs
-
-To monitor the running services:
+Start the MCP server:
 
 ```bash
-# View logs from all services
-docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml logs -f
-
-# View logs from a specific service (e.g., ib-mcp-server)
-docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml logs -f ib-mcp-server
+docker compose -f docker-compose.override.yml up -d --build
 ```
 
-### 5. Stop the Stack
+The HTTP MCP endpoint is:
 
-To stop all running services:
-
-```bash
-docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml down
+```text
+http://localhost:8010/mcp/
 ```
 
-To stop and remove volumes (⚠️ this will delete data):
-
-```bash
-docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml down -v
-```
-
-## Customization
-
-### Adding Services
-
-Edit `docker-compose.override.yml` to add new services or override existing ones. For example:
-
-```yaml
-services:
-  poller:
-    build: ./ib_mcp_overlay/poller
-    environment:
-      - IB_MCP_URL=http://ib-mcp-server:3000
-    depends_on:
-      - ib-mcp-server
-```
-
-### Environment Variables
-
-Create a `.env` file in the same directory where you run `docker compose` to set environment variables:
+If TWS or IB Gateway is running on the same macOS/Windows host as Docker, keep:
 
 ```env
-IB_GATEWAY_PORT=4002
-CLAUDE_API_KEY=your_api_key_here
+IB_HOST=host.docker.internal
 ```
 
-## Raspberry Pi 5 Notes
+If running the MCP server directly on the same machine without Docker, use:
 
-This stack is designed to run on Raspberry Pi 5 (ARM64 architecture):
-- Ensure you're using ARM-compatible base images in any custom Dockerfiles
-- Monitor resource usage with `docker stats` as trading applications can be resource-intensive
-- Consider using external storage for Docker volumes if using heavy logging
-
-## Development
-
-To modify the overlay:
-1. Make changes to the files in `ib_mcp_overlay/`
-2. Rebuild and restart: `docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml up -d --build`
-
-## Updating Upstream
-
-To pull the latest changes from IB_MCP:
-
-```bash
-cd IB_MCP
-git pull origin main
-cd ..
-docker compose -f IB_MCP/docker-compose.yml -f ib_mcp_overlay/docker-compose.override.yml up -d --build
+```env
+IB_HOST=127.0.0.1
 ```
 
-## License
+### Example AI Prompts
 
-This overlay follows the same license as the upstream IB_MCP project. Please refer to the [IB_MCP repository](https://github.com/rcontesti/IB_MCP) for license details.
+- `Show me the nearest AAPL option chain around spot with 10 strikes.`
+- `Get delayed call and put quotes for MSFT expiry 20260619.`
+- `List the available TSLA option expirations and strike range.`
+
+### MCP Client Config
+
+For MCP clients that support HTTP/streamable HTTP, point the client at:
+
+```json
+{
+  "servers": {
+    "ib-option-chain": {
+      "type": "http",
+      "url": "http://localhost:8010/mcp/"
+    }
+  }
+}
+```
