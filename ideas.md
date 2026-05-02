@@ -3,7 +3,7 @@
 
 | Ticker | Strike | OTM % | Contracts | Capital Req. | Premium (Est) | Yield | Rationale |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **LRCX** | 230 | 10% | 2 | $46,000 | $1,810 | 3.93% | High-quality semi; aggressive income. |
+| **LRCX** | 230 | 10% | 1 | $46,000 | $1,810 | 3.93% | High-quality semi; aggressive income. |
 | **TER** | 310 | 10% | 1 | $31,000 | $1,550 | 5.00% | High yield; happy to own at 310. |
 | **GLW** | 128 | 20% | 1 | $12,800 | $210 | 1.64% | Conservative "Value" entry. |
 | **ATI** | 125 | 20% | 1 | $12,500 | $221 | 1.77% | Safety anchor; low assignment risk. |

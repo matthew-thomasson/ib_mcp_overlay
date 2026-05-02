@@ -110,6 +110,7 @@ class OptionChainMCP:
         self.port = port
         self.client_id = client_id
         self.connected = False
+        self._wsh_metadata_fetched = False
         self._register_tools()
 
     async def _ensure_connected(self) -> None:
@@ -317,6 +318,20 @@ class OptionChainMCP:
                 getattr(ticker, "volume", None),
             ),
         )
+
+    async def _ensure_wsh_metadata(self) -> None:
+        """Fetch WSH metadata once per session to initialise the event filter."""
+        if self._wsh_metadata_fetched:
+            return
+        try:
+            if hasattr(self.ib, "reqWshMetaDataAsync"):
+                await self.ib.reqWshMetaDataAsync()
+            else:
+                await _maybe_await(self.ib.reqWshMetaData())
+            self._wsh_metadata_fetched = True
+            logger.info("WSH metadata initialised")
+        except Exception as exc:
+            logger.warning("WSH metadata fetch failed (subscription may be inactive): %s", exc)
 
     def _register_tools(self) -> None:
         @self.mcp.tool(description="Check whether the MCP can connect read-only to IB Gateway or TWS.")
@@ -733,6 +748,120 @@ class OptionChainMCP:
                     }
 
             return grouped
+
+        @self.mcp.tool(
+            description=(
+                "Check whether any earnings announcement falls within a given date window "
+                "for a list of tickers. Uses the IBKR Wall Street Horizon calendar. "
+                "Returns a PASS/WARN/UNAVAILABLE verdict per ticker."
+            )
+        )
+        async def get_earnings_check(
+            tickers: Annotated[list[str], "Stock tickers to check, e.g. ['AAPL', 'MSFT']"],
+            window_start: Annotated[
+                str,
+                "Start of the window to check, as YYYY-MM-DD (usually today).",
+            ],
+            window_end: Annotated[
+                str,
+                "End of the window to check, as YYYY-MM-DD (usually the option expiry date).",
+            ],
+            exchange: Annotated[str, "Stock routing exchange"] = "SMART",
+            currency: Annotated[str, "Contract currency"] = "USD",
+            primary_exchange: Annotated[str, "Primary exchange hint, usually empty"] = "",
+        ) -> dict[str, Any]:
+            import json as _json
+
+            await self._ensure_connected()
+            await self._ensure_wsh_metadata()
+
+            start_ib = window_start.replace("-", "")
+            end_ib = window_end.replace("-", "")
+
+            results: dict[str, Any] = {}
+
+            for raw_symbol in tickers:
+                symbol = raw_symbol.upper().strip()
+                if not symbol:
+                    continue
+                try:
+                    stock = await self._stock_contract(symbol, exchange, currency, primary_exchange)
+                    con_id = stock.conId
+                    if not con_id:
+                        raise ValueError("Could not resolve conId for stock")
+
+                    # WSH filter: earnings only (wshe_ed), for this specific conId
+                    filter_json = _json.dumps({
+                        "watchlist": [str(con_id)],
+                        "wshe_ed": "true",
+                    })
+                    wsh_data = ib.WshEventData(
+                        filter=filter_json,
+                        startDate=start_ib,
+                        endDate=end_ib,
+                        totalLimit=5,
+                    )
+
+                    raw_result = None
+                    if hasattr(self.ib, "reqWshEventDataAsync"):
+                        raw_result = await self.ib.reqWshEventDataAsync(wsh_data)
+                    else:
+                        raw_result = await _maybe_await(self.ib.reqWshEventData(wsh_data))
+
+                    # Parse the returned JSON string from WSH
+                    earnings_events: list[dict[str, Any]] = []
+                    if raw_result:
+                        try:
+                            parsed = _json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+                            if isinstance(parsed, dict):
+                                earnings_events = parsed.get("data", [])
+                            elif isinstance(parsed, list):
+                                earnings_events = parsed
+                        except Exception:
+                            pass
+
+                    if not earnings_events:
+                        results[symbol] = {
+                            "verdict": "PASS",
+                            "message": f"No earnings found between {window_start} and {window_end}.",
+                            "earnings_date": None,
+                            "con_id": con_id,
+                        }
+                    else:
+                        # Pick the earliest event date in the window
+                        earliest = min(
+                            earnings_events,
+                            key=lambda e: str(e.get("date", e.get("startDate", ""))),
+                        )
+                        earnings_date = earliest.get("date") or earliest.get("startDate") or "unknown"
+                        results[symbol] = {
+                            "verdict": "WARN",
+                            "message": (
+                                f"⚠️ Earnings detected on {earnings_date} — inside your trade window "
+                                f"({window_start} → {window_end}). Review before staging the order."
+                            ),
+                            "earnings_date": earnings_date,
+                            "con_id": con_id,
+                            "raw_events": earnings_events,
+                        }
+
+                except Exception as exc:
+                    logger.warning("Earnings check failed for %s: %s", symbol, exc)
+                    results[symbol] = {
+                        "verdict": "UNAVAILABLE",
+                        "message": (
+                            f"Could not retrieve earnings data for {symbol}. "
+                            "Verify your Wall Street Horizon subscription is active in IBKR Account Management. "
+                            f"Error: {exc}"
+                        ),
+                        "earnings_date": None,
+                    }
+
+            return {
+                "window_start": window_start,
+                "window_end": window_end,
+                "results": results,
+            }
 
         @self.mcp.tool(
             description="Preview a cash-secured put limit order without placing it in TWS."
