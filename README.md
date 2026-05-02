@@ -10,6 +10,7 @@ This overlay contains local additions for running Interactive Brokers MCP servic
 
 - `get_option_chain_summary`: returns available expirations, strike count, strike range, chain exchange, trading class, and multiplier.
 - `get_option_chain_prices`: returns capped option quote snapshots with bid, ask, last, close, mark, midpoint, implied volatility, and model greeks when IBKR provides them.
+- `find_cash_secured_put_opportunities`: returns PUT contracts near a target expiry that are 10-20% OTM by default, with quote fields and cash-secured put calculations grouped by ticker.
 
 The server does not expose order-placement tools.
 
@@ -70,6 +71,7 @@ IB_HOST=127.0.0.1
 - `Show me the nearest AAPL option chain around spot with 10 strikes.`
 - `Get delayed call and put quotes for MSFT expiry 20260619.`
 - `List the available TSLA option expirations and strike range.`
+- `For AAPL, MSFT, and TSLA, identify cash-secured put selling opportunities closest to 2026-06-12, approximately 10-20% OTM, and return bid, ask, mid, delta, open interest, volume, implied volatility, capital required, premium at ask, and effective entry price as JSON grouped by ticker.`
 
 ### MCP Client Config
 
