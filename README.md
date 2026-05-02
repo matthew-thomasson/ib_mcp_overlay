@@ -93,6 +93,30 @@ If running the MCP server directly on the same machine without Docker, use:
 IB_HOST=127.0.0.1
 ```
 
+### Auto Start At Login
+
+This repo includes a launchd plist and startup script that start Colima and the MCP container when you log in:
+
+- `scripts/start_mcp_stack.sh`
+- `launchd/com.matthewthomasson.ib_mcp_overlay.plist`
+
+Install them with:
+
+```bash
+mkdir -p ~/Library/LaunchAgents ~/Library/Logs/ib_mcp_overlay
+cp launchd/com.matthewthomasson.ib_mcp_overlay.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.matthewthomasson.ib_mcp_overlay.plist
+launchctl enable gui/$(id -u)/com.matthewthomasson.ib_mcp_overlay
+launchctl kickstart -k gui/$(id -u)/com.matthewthomasson.ib_mcp_overlay
+```
+
+The startup script:
+
+- starts Colima if it is not already running,
+- waits for the Docker daemon,
+- runs `docker compose -f docker-compose.override.yml up -d --build`,
+- uses `IB_PORT=7496` by default.
+
 ### Health Checks
 
 Check that TWS is listening locally:
