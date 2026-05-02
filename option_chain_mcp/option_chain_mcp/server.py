@@ -344,6 +344,118 @@ class OptionChainMCP:
                     "error": str(exc),
                 }
 
+        @self.mcp.tool(
+            description=(
+                "Return a read-only portfolio snapshot: open positions, cash balances, "
+                "and key account values grouped by account."
+            )
+        )
+        async def get_portfolio_snapshot(
+            account: Annotated[
+                str,
+                "Optional account id. Empty returns all accounts visible to this TWS session.",
+            ] = "",
+            include_zero_positions: Annotated[
+                bool,
+                "Include zero-quantity positions returned by TWS.",
+            ] = False,
+        ) -> dict[str, Any]:
+            await self._ensure_connected()
+
+            managed_accounts = list(await _maybe_await(self.ib.managedAccounts()) or [])
+            requested_accounts = [account] if account else managed_accounts
+
+            raw_positions = list(self.ib.positions(account) or [])
+            positions_by_account: dict[str, list[dict[str, Any]]] = {
+                account_id: [] for account_id in requested_accounts
+            }
+
+            for position in raw_positions:
+                quantity = _clean_float(getattr(position, "position", None))
+                if quantity == 0 and not include_zero_positions:
+                    continue
+
+                contract = getattr(position, "contract", None)
+                account_id = str(getattr(position, "account", ""))
+                if account and account_id != account:
+                    continue
+
+                positions_by_account.setdefault(account_id, []).append(
+                    {
+                        "account": account_id,
+                        "symbol": getattr(contract, "symbol", None),
+                        "sec_type": getattr(contract, "secType", None),
+                        "con_id": getattr(contract, "conId", None),
+                        "exchange": getattr(contract, "exchange", None),
+                        "primary_exchange": getattr(contract, "primaryExchange", None),
+                        "currency": getattr(contract, "currency", None),
+                        "local_symbol": getattr(contract, "localSymbol", None),
+                        "trading_class": getattr(contract, "tradingClass", None),
+                        "position": quantity,
+                        "avg_cost": _clean_float(getattr(position, "avgCost", None)),
+                    }
+                )
+
+            summary_items = list(await self.ib.accountSummaryAsync(account))
+            values_by_account: dict[str, dict[str, Any]] = {
+                account_id: {} for account_id in requested_accounts
+            }
+            cash_balances: dict[str, dict[str, float]] = {
+                account_id: {} for account_id in requested_accounts
+            }
+
+            cash_tags = {
+                "CashBalance",
+                "TotalCashBalance",
+                "SettledCash",
+                "AccruedCash",
+            }
+
+            for item in summary_items:
+                account_id = str(getattr(item, "account", ""))
+                tag = str(getattr(item, "tag", ""))
+                currency = str(getattr(item, "currency", ""))
+                value_raw = getattr(item, "value", None)
+                value = _clean_float(value_raw)
+
+                values_by_account.setdefault(account_id, {})
+                cash_balances.setdefault(account_id, {})
+
+                if currency:
+                    values_by_account[account_id].setdefault(tag, {})[currency] = (
+                        value if value is not None else value_raw
+                    )
+                else:
+                    values_by_account[account_id][tag] = value if value is not None else value_raw
+
+                if tag in cash_tags and currency and value is not None:
+                    cash_balances[account_id][f"{tag}:{currency}"] = value
+
+            accounts: dict[str, Any] = {}
+            for account_id in sorted(set(requested_accounts) | set(positions_by_account)):
+                account_values = values_by_account.get(account_id, {})
+                accounts[account_id] = {
+                    "cash_balances": cash_balances.get(account_id, {}),
+                    "net_liquidation": account_values.get("NetLiquidation"),
+                    "buying_power": account_values.get("BuyingPower"),
+                    "available_funds": account_values.get("AvailableFunds"),
+                    "excess_liquidity": account_values.get("ExcessLiquidity"),
+                    "gross_position_value": account_values.get("GrossPositionValue"),
+                    "positions": sorted(
+                        positions_by_account.get(account_id, []),
+                        key=lambda row: (str(row.get("sec_type")), str(row.get("symbol"))),
+                    ),
+                    "account_values": account_values,
+                }
+
+            return {
+                "connected": self.ib.isConnected(),
+                "readonly": True,
+                "managed_accounts": managed_accounts,
+                "requested_account": account or None,
+                "accounts": accounts,
+            }
+
         @self.mcp.tool(description="List available option expirations and strike ranges for a stock ticker.")
         async def get_option_chain_summary(
             symbol: Annotated[str, "Stock ticker, for example AAPL or MSFT"],
