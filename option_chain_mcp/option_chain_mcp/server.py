@@ -734,6 +734,131 @@ class OptionChainMCP:
 
             return grouped
 
+        @self.mcp.tool(
+            description="Preview a cash-secured put limit order without placing it in TWS."
+        )
+        async def preview_cash_secured_put_order(
+            ticker: Annotated[str, "Stock ticker, for example AAPL"],
+            expiry: Annotated[str, "Target expiry as YYYY-MM-DD"],
+            strike: Annotated[float, "Strike price"],
+            quantity: Annotated[int, "Number of contracts"],
+            limit_price: Annotated[float, "Limit price for the premium"],
+            confirm_stage_only: Annotated[bool, "Must be true to confirm this is a stage-only order"],
+            account: Annotated[str, "Optional IBKR account id"] = "",
+        ) -> dict[str, Any]:
+            if not confirm_stage_only:
+                raise ValueError("confirm_stage_only must be true")
+            if quantity <= 0:
+                raise ValueError("Quantity must be greater than 0")
+            if limit_price <= 0:
+                raise ValueError("Limit price must be greater than 0")
+
+            await self._ensure_connected()
+
+            expiry_ib = expiry.replace("-", "")
+            contract = ib.Option(
+                symbol=ticker.upper(),
+                lastTradeDateOrContractMonth=expiry_ib,
+                strike=strike,
+                right="P",
+                exchange="SMART",
+                currency="USD"
+            )
+            qualified_raw = await self.ib.qualifyContractsAsync(contract)
+            qualified = [c for c in qualified_raw if c is not None]
+            if not qualified:
+                raise ValueError("IBKR did not qualify the option contract. Check the ticker, strike, and expiry.")
+
+            capital_required = strike * 100 * quantity
+            premium = limit_price * 100 * quantity
+            effective_entry = strike - limit_price
+
+            return {
+                "status": "preview_successful",
+                "ticker": ticker.upper(),
+                "expiry": expiry,
+                "strike": strike,
+                "right": "PUT",
+                "action": "SELL",
+                "quantity": quantity,
+                "limit_price": limit_price,
+                "premium": premium,
+                "capital_required": capital_required,
+                "effective_entry": effective_entry,
+                "transmit": False,
+                "message": "Preview successful. Ready to stage."
+            }
+
+        @self.mcp.tool(
+            description="Create a staged/draft SELL PUT limit order in TWS so I can review it manually and click Transmit myself."
+        )
+        async def create_draft_cash_secured_put_order(
+            ticker: Annotated[str, "Stock ticker, for example AAPL"],
+            expiry: Annotated[str, "Target expiry as YYYY-MM-DD"],
+            strike: Annotated[float, "Strike price"],
+            quantity: Annotated[int, "Number of contracts"],
+            limit_price: Annotated[float, "Limit price for the premium"],
+            confirm_stage_only: Annotated[bool, "Must be true to confirm this is a stage-only order"],
+            account: Annotated[str, "Optional IBKR account id"] = "",
+        ) -> dict[str, Any]:
+            if not confirm_stage_only:
+                raise ValueError("confirm_stage_only must be true")
+            if quantity <= 0:
+                raise ValueError("Quantity must be greater than 0")
+            if limit_price <= 0:
+                raise ValueError("Limit price must be greater than 0")
+
+            await self._ensure_connected()
+
+            expiry_ib = expiry.replace("-", "")
+            contract = ib.Option(
+                symbol=ticker.upper(),
+                lastTradeDateOrContractMonth=expiry_ib,
+                strike=strike,
+                right="P",
+                exchange="SMART",
+                currency="USD"
+            )
+            qualified_raw = await self.ib.qualifyContractsAsync(contract)
+            qualified = [c for c in qualified_raw if c is not None]
+            if not qualified:
+                raise ValueError("IBKR did not qualify the option contract. Check the ticker, strike, and expiry.")
+            
+            qualified_contract = qualified[0]
+
+            capital_required = strike * 100 * quantity
+            premium = limit_price * 100 * quantity
+            effective_entry = strike - limit_price
+
+            order = ib.LimitOrder(
+                action="SELL",
+                totalQuantity=quantity,
+                lmtPrice=limit_price,
+            )
+            order.transmit = False
+            if account:
+                order.account = account
+
+            trade = self.ib.placeOrder(qualified_contract, order)
+
+            return {
+                "status": "draft_created",
+                "ticker": ticker.upper(),
+                "expiry": expiry,
+                "strike": strike,
+                "right": "PUT",
+                "action": "SELL",
+                "quantity": quantity,
+                "limit_price": limit_price,
+                "premium": premium,
+                "capital_required": capital_required,
+                "effective_entry": effective_entry,
+                "transmit": False,
+                "ib_order_id": str(trade.order.orderId) if trade.order else None,
+                "message": "Draft order created in TWS. Review manually and click Transmit if happy."
+            }
+
+
     def run(self, transport: str, http_host: str, http_port: int) -> None:
         logging.basicConfig(level=logging.INFO)
         try:

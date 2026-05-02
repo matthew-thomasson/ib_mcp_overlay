@@ -22,8 +22,10 @@ This overlay contains local additions for running Interactive Brokers MCP servic
 - `get_option_chain_prices`: returns capped option quote snapshots with bid, ask, last, close, mark, midpoint, implied volatility, and model greeks when IBKR provides them.
 - `find_cash_secured_put_opportunities`: returns PUT contracts near a target expiry that are 10-20% OTM by default, with quote fields and cash-secured put calculations grouped by ticker.
 - `get_portfolio_snapshot`: returns open positions, cash balances, and key account values grouped by account.
+- `preview_cash_secured_put_order`: calculates capital required, premium, and effective entry for a staging check without interacting with TWS.
+- `create_draft_cash_secured_put_order`: creates an untransmitted (staged) SELL PUT limit order directly in TWS for manual review and approval.
 
-The server does not expose order-placement tools.
+The server does not expose auto-trading tools. All orders are strictly staged as drafts.
 
 ## Prerequisites
 
@@ -160,6 +162,26 @@ Tool:
 ```
 
 Returns positions, cash balances, net liquidation, buying power, available funds, excess liquidity, gross position value, and raw account values grouped by account.
+
+### Draft Cash-Secured Put Order
+
+Tool:
+
+```json
+{
+  "name": "create_draft_cash_secured_put_order",
+  "arguments": {
+    "ticker": "LRCX",
+    "expiry": "2026-06-12",
+    "strike": 230,
+    "quantity": 1,
+    "limit_price": 9.05,
+    "confirm_stage_only": true
+  }
+}
+```
+
+Returns draft order status with the generated `ib_order_id`, and confirmation that `transmit: false` was used so the order requires manual approval in TWS.
 
 ### Cash-Secured Put Scanner
 
