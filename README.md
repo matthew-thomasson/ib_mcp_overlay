@@ -2,6 +2,16 @@
 
 This overlay contains local additions for running Interactive Brokers MCP services without forking upstream MCP projects.
 
+## Current Status
+
+- Docker image builds and runs locally.
+- MCP endpoint: `http://localhost:8010/mcp`
+- Tested against TWS live API port `7496`.
+- Confirmed read-only connection to account `U12024249`.
+- Confirmed portfolio snapshot returns positions and cash balances.
+- Confirmed option-chain metadata and cash-secured put scanner return structured JSON.
+- Option bid/ask/delta/IV fields depend on IBKR market-data permissions and market/session availability.
+
 ## Option Chain MCP
 
 `option_chain_mcp` is a read-only MCP server that connects to IB Gateway or TWS through the TWS API using `ib_async`. It exposes tools for AI clients to query option-chain metadata and option price snapshots for stock tickers.
@@ -14,6 +24,14 @@ This overlay contains local additions for running Interactive Brokers MCP servic
 - `get_portfolio_snapshot`: returns open positions, cash balances, and key account values grouped by account.
 
 The server does not expose order-placement tools.
+
+## Prerequisites
+
+- Docker and Docker Compose.
+- Interactive Brokers TWS or IB Gateway installed.
+- TWS/Gateway must be open, logged in, and not session-expired.
+- IBKR API socket access enabled in TWS/Gateway.
+- Market-data permissions for the symbols/options you want live quotes for.
 
 ### IBKR Setup
 
@@ -28,6 +46,8 @@ In TWS or IB Gateway:
    - IB Gateway live: often `4001`
 
 You must have the relevant options and market-data permissions in your IBKR account. If live prices are unavailable, call `get_option_chain_prices` with `market_data_type=3` for delayed data.
+
+If TWS reports `session expired`, log back in. The MCP does not authenticate to IBKR by itself; it connects to the already-authenticated local TWS/Gateway API socket.
 
 ### Run With Docker Compose
 
@@ -49,10 +69,16 @@ Start the MCP server:
 docker compose -f docker-compose.override.yml up -d --build
 ```
 
+If using the local Colima setup created during development, this also works:
+
+```bash
+IB_PORT=7496 /opt/homebrew/bin/docker compose -f docker-compose.override.yml up -d --build
+```
+
 The HTTP MCP endpoint is:
 
 ```text
-http://localhost:8010/mcp/
+http://localhost:8010/mcp
 ```
 
 If TWS or IB Gateway is running on the same macOS/Windows host as Docker, keep:
@@ -66,6 +92,96 @@ If running the MCP server directly on the same machine without Docker, use:
 ```env
 IB_HOST=127.0.0.1
 ```
+
+### Health Checks
+
+Check that TWS is listening locally:
+
+```bash
+nc -vz 127.0.0.1 7496
+```
+
+Check the container:
+
+```bash
+docker ps --filter name=option_chain_mcp
+docker logs --tail 80 option_chain_mcp
+```
+
+Call the MCP tool `check_ibkr_connection`. A healthy response looks like:
+
+```json
+{
+  "connected": true,
+  "host": "host.docker.internal",
+  "port": 7496,
+  "readonly": true,
+  "managed_accounts": ["U12024249"]
+}
+```
+
+## Tool Examples
+
+### Portfolio Snapshot
+
+Tool:
+
+```json
+{
+  "name": "get_portfolio_snapshot",
+  "arguments": {
+    "include_zero_positions": false
+  }
+}
+```
+
+Returns positions, cash balances, net liquidation, buying power, available funds, excess liquidity, gross position value, and raw account values grouped by account.
+
+### Cash-Secured Put Scanner
+
+Tool:
+
+```json
+{
+  "name": "find_cash_secured_put_opportunities",
+  "arguments": {
+    "tickers": ["AAPL", "MSFT", "TSLA"],
+    "target_expiry": "2026-06-12",
+    "min_otm_pct": 0.10,
+    "max_otm_pct": 0.20,
+    "max_strikes_per_ticker": 12,
+    "market_data_type": 3,
+    "quote_wait_seconds": 4
+  }
+}
+```
+
+Returns JSON grouped by ticker. Each contract includes strike, bid, ask, mid, delta, open interest, volume, implied volatility, capital required, premium at ask, and effective entry price when IBKR provides those fields.
+
+### Option Chain Summary
+
+Tool:
+
+```json
+{
+  "name": "get_option_chain_summary",
+  "arguments": {
+    "symbol": "AAPL",
+    "max_expirations": 12
+  }
+}
+```
+
+## Market Data Notes
+
+IBKR may return `null` for bid, ask, delta, or implied volatility when:
+
+- the market is closed,
+- delayed option data is not available for that contract,
+- the account lacks the required options market-data subscription,
+- TWS/Gateway has not fully connected to the relevant market-data farm.
+
+The scanner normalizes IBKR's unavailable quote values, such as `-1`, to `null`.
 
 ### Example AI Prompts
 
@@ -84,8 +200,17 @@ For MCP clients that support HTTP/streamable HTTP, point the client at:
   "servers": {
     "ib-option-chain": {
       "type": "http",
-      "url": "http://localhost:8010/mcp/"
+      "url": "http://localhost:8010/mcp"
     }
   }
 }
 ```
+
+## Troubleshooting
+
+- `Connection refused` on `7496` or `7497`: TWS/Gateway is not listening, API socket access is disabled, or the wrong port is configured.
+- `connected: false` from `check_ibkr_connection`: TWS/Gateway is closed, logged out, session-expired, or blocking API clients.
+- Empty option prices with valid contracts: usually market-data permissions, delayed data availability, or market-hours behavior.
+- Docker cannot reach TWS: use `IB_HOST=host.docker.internal` when TWS runs on the Docker host.
+- Running on paper TWS: set `IB_PORT=7497`.
+- Running on live TWS: set `IB_PORT=7496`.
