@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import inspect
 import logging
 import math
@@ -334,6 +335,14 @@ class OptionChainMCP:
                 int,
                 Field(description="Hard cap on option contracts requested from IBKR", ge=1, le=60),
             ] = 40,
+            quote_wait_seconds: Annotated[
+                float,
+                Field(
+                    description="Seconds to wait for option ticks after subscribing",
+                    ge=1,
+                    le=10,
+                ),
+            ] = 3,
         ) -> dict[str, Any]:
             await self._ensure_connected()
             stock = await self._stock_contract(symbol, exchange, currency, primary_exchange)
@@ -365,8 +374,14 @@ class OptionChainMCP:
                 raise ValueError("IBKR did not qualify any option contracts for the request")
 
             await self._set_market_data_type(market_data_type)
-            tickers = await self.ib.reqTickersAsync(*qualified)
+            tickers = [
+                self.ib.reqMktData(contract, "", False, False)
+                for contract in qualified
+            ]
+            await asyncio.sleep(quote_wait_seconds)
             quotes = [asdict(self._quote_from_ticker(ticker)) for ticker in tickers]
+            for contract in qualified:
+                self.ib.cancelMktData(contract)
             quotes.sort(key=lambda row: (row["expiry"], row["strike"], row["right"]))
 
             return {
@@ -376,6 +391,7 @@ class OptionChainMCP:
                 "expiry": selected_expiry,
                 "right": right,
                 "market_data_type": market_data_type,
+                "quote_wait_seconds": quote_wait_seconds,
                 "chain_exchange": getattr(chain, "exchange", ""),
                 "requested_contracts": len(contracts),
                 "returned_quotes": len(quotes),

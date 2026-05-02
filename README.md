@@ -35,6 +35,12 @@ Copy the example environment file and edit ports if needed:
 cp .env.example .env
 ```
 
+Your current local TWS setup was verified on live TWS port `7496`, so set:
+
+```env
+IB_PORT=7496
+```
+
 Start the MCP server:
 
 ```bash
