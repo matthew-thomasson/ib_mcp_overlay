@@ -552,7 +552,8 @@ class OptionChainMCP:
                 trading_class or str(getattr(chain, "tradingClass", "")),
             )
             contracts = contracts[:max_contracts]
-            qualified = await self.ib.qualifyContractsAsync(*contracts)
+            qualified_raw = await self.ib.qualifyContractsAsync(*contracts)
+            qualified = [contract for contract in qualified_raw if contract is not None]
             if not qualified:
                 raise ValueError("IBKR did not qualify any option contracts for the request")
 
@@ -577,6 +578,8 @@ class OptionChainMCP:
                 "quote_wait_seconds": quote_wait_seconds,
                 "chain_exchange": getattr(chain, "exchange", ""),
                 "requested_contracts": len(contracts),
+                "qualified_contracts": len(qualified),
+                "skipped_unqualified_contracts": len(contracts) - len(qualified),
                 "returned_quotes": len(quotes),
                 "quotes": quotes,
             }
