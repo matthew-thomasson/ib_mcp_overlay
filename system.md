@@ -8,6 +8,8 @@ You have access to the following tools via the MCP:
 - `mcp_option_chain_mcp_get_option_chain_prices`: Get real-time/delayed snapshots.
 - `mcp_option_chain_mcp_find_cash_secured_put_opportunities`: Bulk scan for OTM put candidates.
 - `mcp_option_chain_mcp_get_portfolio_snapshot`: Check current positions and buying power.
+- `mcp_option_chain_mcp_get_trade_history`: Retrieve read-only execution/trade history for a specified date/time window.
+- `mcp_option_chain_mcp_get_flex_trade_history`: Retrieve historical trades from an IBKR Flex Query for a specified date/time window.
 - `mcp_option_chain_mcp_check_ibkr_connection`: Verify the link to TWS/Gateway.
 - `mcp_option_chain_mcp_create_draft_cash_secured_put_order`: Stage draft put orders for manual review.
 - `mcp_option_chain_mcp_preview_cash_secured_put_order`: Preview capital and premium metrics.

@@ -9,6 +9,7 @@ This overlay contains local additions for running Interactive Brokers MCP servic
 - Tested against TWS live API port `7496`.
 - Confirmed read-only connection to account `U12024249`.
 - Confirmed portfolio snapshot returns positions and cash balances.
+- Trade history can be retrieved from IBKR Flex Web Service; the TWS execution-report endpoint remains available as a short-window diagnostic fallback.
 - Confirmed option-chain metadata and cash-secured put scanner return structured JSON.
 - Option bid/ask/delta/IV fields depend on IBKR market-data permissions and market/session availability.
 
@@ -22,6 +23,8 @@ This overlay contains local additions for running Interactive Brokers MCP servic
 - `get_option_chain_prices`: returns capped option quote snapshots with bid, ask, last, close, mark, midpoint, implied volatility, and model greeks when IBKR provides them.
 - `find_cash_secured_put_opportunities`: returns PUT contracts near a target expiry that are 10-20% OTM by default, with quote fields and cash-secured put calculations grouped by ticker.
 - `get_portfolio_snapshot`: returns open positions, cash balances, and key account values grouped by account.
+- `get_flex_trade_history`: returns historical trades from an IBKR Flex Query with optional account, symbol, security type, and side filters.
+- `get_trade_history`: returns TWS execution reports for a requested date/time window. This is not reliable for historical trade reporting; use `get_flex_trade_history` for account history.
 - `preview_cash_secured_put_order`: calculates capital required, premium, and effective entry for a staging check without interacting with TWS.
 - `create_draft_cash_secured_put_order`: creates an untransmitted (staged) SELL PUT limit order directly in TWS for manual review and approval.
 
@@ -53,7 +56,9 @@ If TWS reports `session expired`, log back in. The MCP does not authenticate to 
 
 ### Run With Docker Compose
 
-Copy the example environment file and edit ports if needed:
+The repo keeps non-secret defaults in `.env.shared`, which is safe to sync through git. The Flex token is loaded at runtime from AWS Secrets Manager through the secret id in `IB_FLEX_TOKEN_SECRET_ID`. A local ignored `.env` can still override `.env.shared` for machine-specific settings or temporary testing.
+
+For a fully local fallback, copy the example environment file and add `IB_FLEX_TOKEN` locally:
 
 ```bash
 cp .env.example .env
@@ -63,6 +68,30 @@ Your current local TWS setup was verified on live TWS port `7496`, so set:
 
 ```env
 IB_PORT=7496
+IB_FLEX_TOKEN=your_flex_web_service_token
+IB_FLEX_TRADE_QUERY_ID=your_trade_history_flex_query_id
+IB_FLEX_TRADE_QUERY_ID_LAST_BUSINESS_WEEK=your_last_business_week_query_id
+IB_FLEX_TRADE_QUERY_ID_YTD=your_ytd_query_id
+IB_FLEX_TRADE_QUERY_ID_MTD=your_mtd_query_id
+```
+
+For the synced setup, store only the Flex token in AWS Secrets Manager:
+
+```bash
+aws secretsmanager create-secret \
+  --name ibkr/flex/token \
+  --secret-string '{"token":"YOUR_FLEX_TOKEN"}'
+```
+
+On each machine, configure AWS CLI credentials with permission to read that secret. The startup script reads `.env.shared`, fetches the secret value, exports `IB_FLEX_TOKEN`, and then starts Docker Compose.
+
+To test the secret lookup directly:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id ibkr/flex/token \
+  --query SecretString \
+  --output text
 ```
 
 Start the MCP server:
@@ -116,6 +145,8 @@ The startup script:
 
 - starts Colima if it is not already running,
 - waits for the Docker daemon,
+- loads non-secret settings from tracked `.env.shared`,
+- loads `IB_FLEX_TOKEN` from AWS Secrets Manager when `IB_FLEX_TOKEN_SECRET_ID` is set,
 - runs `docker compose -f docker-compose.override.yml up -d --build`,
 - uses `IB_PORT=7496` by default.
 
@@ -162,6 +193,42 @@ Tool:
 ```
 
 Returns positions, cash balances, net liquidation, buying power, available funds, excess liquidity, gross position value, and raw account values grouped by account.
+
+### Flex Trade History
+
+Tool:
+
+```json
+{
+  "name": "get_flex_trade_history",
+  "arguments": {
+    "start_date": "2026-04-01",
+    "end_date": "2026-05-04",
+    "query_period": "ytd",
+    "account": "U12024249",
+    "max_results": 100
+  }
+}
+```
+
+Returns historical trade rows from IBKR Flex Web Service. Configure `IB_FLEX_TOKEN` and either pass `query_id` or use `query_period` with one of `default`, `last_business_week`, `ytd`, or `mtd`. The Flex Query template in IBKR Account Management controls the report period and fields IBKR returns; this MCP applies the requested date/account/symbol filters after the statement is retrieved.
+
+### TWS Execution Reports
+
+Tool:
+
+```json
+{
+  "name": "get_trade_history",
+  "arguments": {
+    "start_date": "2026-05-01",
+    "end_date": "2026-05-04",
+    "max_results": 100
+  }
+}
+```
+
+Returns TWS execution reports when TWS exposes them for the current API session. In testing, this endpoint returned no historical fills even when trades existed, so use Flex for durable trade history.
 
 ### Draft Cash-Secured Put Order
 
@@ -236,6 +303,7 @@ The scanner normalizes IBKR's unavailable quote values, such as `-1`, to `null`.
 - `List the available TSLA option expirations and strike range.`
 - `For AAPL, MSFT, and TSLA, identify cash-secured put selling opportunities closest to 2026-06-12, approximately 10-20% OTM, and return bid, ask, mid, delta, open interest, volume, implied volatility, capital required, premium at ask, and effective entry price as JSON grouped by ticker.`
 - `Return my current portfolio snapshot with all open positions and cash balances as structured JSON.`
+- `Return my trade history from 2026-05-01 through 2026-05-04.`
 
 ### MCP Client Config
 

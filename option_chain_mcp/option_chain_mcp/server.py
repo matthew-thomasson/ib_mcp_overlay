@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import inspect
 import logging
 import math
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Annotated, Any, Iterable, Literal
 
 import ib_async as ib
@@ -17,6 +22,8 @@ from pydantic import Field
 logger = logging.getLogger(__name__)
 
 Right = Literal["call", "put", "both"]
+FlexTradeQueryPeriod = Literal["default", "last_business_week", "ytd", "mtd"]
+FLEX_BASE_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,247 @@ def _today_yyyymmdd() -> str:
 def _parse_yyyymmdd(value: str) -> datetime:
     normalized = value.replace("-", "")
     return datetime.strptime(normalized, "%Y%m%d").replace(tzinfo=UTC)
+
+
+def _parse_date_or_datetime(value: str, boundary: Literal["start", "end"]) -> datetime:
+    raw_value = value.strip()
+    if not raw_value:
+        raise ValueError(f"{boundary}_date is required")
+
+    normalized = raw_value.replace("T", " ").replace("/", "-")
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y%m%d %H:%M",
+        "%Y-%m-%d",
+        "%Y%m%d",
+    ]
+
+    parsed: datetime | None = None
+    for date_format in formats:
+        try:
+            parsed = datetime.strptime(normalized, date_format)
+            break
+        except ValueError:
+            continue
+
+    if parsed is None:
+        raise ValueError(
+            f"{boundary}_date must be YYYY-MM-DD, YYYYMMDD, or include HH:MM[:SS]"
+        )
+
+    date_only = len(normalized.replace("-", "")) == 8
+    if date_only and boundary == "end":
+        parsed = datetime.combine(parsed.date(), time(23, 59, 59))
+    elif date_only:
+        parsed = datetime.combine(parsed.date(), time(0, 0, 0))
+
+    return parsed.replace(tzinfo=UTC)
+
+
+def _format_execution_filter_time(value: datetime) -> str:
+    return value.strftime("%Y%m%d %H:%M:%S")
+
+
+def _parse_execution_time(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("T", " ").replace("-", "")
+    formats = [
+        "%Y%m%d %H:%M:%S %Z",
+        "%Y%m%d %H:%M:%S",
+        "%Y%m%d  %H:%M:%S",
+        "%Y%m%d",
+    ]
+    for date_format in formats:
+        try:
+            parsed = datetime.strptime(normalized, date_format)
+            return parsed.replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def _contract_summary(contract: Any) -> dict[str, Any]:
+    return {
+        "symbol": getattr(contract, "symbol", None),
+        "sec_type": getattr(contract, "secType", None),
+        "con_id": getattr(contract, "conId", None),
+        "exchange": getattr(contract, "exchange", None),
+        "primary_exchange": getattr(contract, "primaryExchange", None),
+        "currency": getattr(contract, "currency", None),
+        "local_symbol": getattr(contract, "localSymbol", None),
+        "trading_class": getattr(contract, "tradingClass", None),
+        "expiry": getattr(contract, "lastTradeDateOrContractMonth", None),
+        "strike": _clean_float(getattr(contract, "strike", None)),
+        "right": getattr(contract, "right", None),
+        "multiplier": getattr(contract, "multiplier", None),
+    }
+
+
+def _commission_report_summary(report: Any) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    return {
+        "exec_id": getattr(report, "execId", None),
+        "commission": _clean_float(getattr(report, "commission", None)),
+        "currency": getattr(report, "currency", None),
+        "realized_pnl": _clean_float(getattr(report, "realizedPNL", None)),
+        "yield": _clean_float(getattr(report, "yield_", None)),
+        "yield_redemption_date": getattr(report, "yieldRedemptionDate", None),
+    }
+
+
+def _strip_xml_namespace(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _xml_child_text(element: ET.Element, child_name: str) -> str | None:
+    for child in list(element):
+        if _strip_xml_namespace(child.tag) == child_name:
+            return (child.text or "").strip() or None
+    return None
+
+
+def _xml_to_data(element: ET.Element) -> dict[str, Any]:
+    data: dict[str, Any] = dict(element.attrib)
+    text = (element.text or "").strip()
+    if text:
+        data["text"] = text
+
+    for child in list(element):
+        key = _strip_xml_namespace(child.tag)
+        value = _xml_to_data(child)
+        if key in data:
+            if not isinstance(data[key], list):
+                data[key] = [data[key]]
+            data[key].append(value)
+        else:
+            data[key] = value
+    return data
+
+
+def _flex_key_to_snake(value: str) -> str:
+    output = []
+    for index, char in enumerate(value.strip()):
+        if char.isupper() and index > 0 and value[index - 1].islower():
+            output.append("_")
+        elif char in {" ", "-", "/", ";"}:
+            output.append("_")
+            continue
+        output.append(char.lower())
+    return "".join(output).strip("_")
+
+
+def _parse_flex_trade_datetime(row: dict[str, Any]) -> datetime | None:
+    raw_value = _first_present_string(
+        row.get("dateTime"),
+        row.get("DateTime"),
+        row.get("date_time"),
+        row.get("tradeDateTime"),
+        row.get("TradeDateTime"),
+        row.get("trade_date_time"),
+        row.get("transactionDateTime"),
+        row.get("TransactionDateTime"),
+        row.get("transaction_date_time"),
+        row.get("tradeDate"),
+        row.get("TradeDate"),
+        row.get("trade_date"),
+        row.get("date"),
+        row.get("Date"),
+        row.get("reportDate"),
+        row.get("ReportDate"),
+        row.get("report_date"),
+    )
+    if raw_value is None:
+        return None
+
+    value = raw_value.strip()
+    if ";" in value:
+        left, right = value.split(";", 1)
+        value = f"{left.strip()} {right.strip()}"
+    value = value.replace("T", " ").replace("/", "-")
+    compact = value.replace("-", "")
+
+    formats = [
+        "%Y%m%d %H:%M:%S",
+        "%Y%m%d %H%M%S",
+        "%Y%m%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y%m%d",
+        "%Y-%m-%d",
+    ]
+    for date_format in formats:
+        candidate = compact if date_format.startswith("%Y%m%d") else value
+        try:
+            return datetime.strptime(candidate, date_format).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def _first_present_string(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _row_matches_text_filter(row: dict[str, Any], expected: str, keys: Iterable[str]) -> bool:
+    normalized_expected = expected.upper().strip()
+    if not normalized_expected:
+        return True
+    return any(
+        str(row.get(key, row.get(_flex_key_to_snake(key), ""))).upper().strip() == normalized_expected
+        for key in keys
+    )
+
+
+def _row_matches_symbol_filter(row: dict[str, Any], symbol: str) -> bool:
+    normalized_symbol = symbol.upper().strip()
+    if not normalized_symbol:
+        return True
+    for key in ("symbol", "underlyingSymbol", "issuer", "description"):
+        value = str(row.get(key, row.get(_flex_key_to_snake(key), ""))).upper()
+        if value == normalized_symbol or value.startswith(f"{normalized_symbol} "):
+            return True
+    return False
+
+
+def _row_matches_side_filter(row: dict[str, Any], side: str) -> bool:
+    normalized_side = side.upper().strip()
+    if not normalized_side:
+        return True
+
+    flex_side = str(
+        row.get("buySell", row.get("buy_sell", row.get("side", "")))
+    ).upper().strip()
+    aliases = {
+        "BOT": {"BOT", "BUY", "BOUGHT"},
+        "SLD": {"SLD", "SELL", "SOLD"},
+    }
+    return flex_side in aliases.get(normalized_side, {normalized_side})
+
+
+def _http_get_text(url: str, params: dict[str, str], timeout: float) -> str:
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(f"{url}?{query}", headers={"User-Agent": "ib-mcp-overlay/0.1"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Flex Web Service request failed: {exc}") from exc
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -333,6 +581,227 @@ class OptionChainMCP:
         except Exception as exc:
             logger.warning("WSH metadata fetch failed (subscription may be inactive): %s", exc)
 
+    async def _flex_send_request(
+        self,
+        token: str,
+        query_id: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        xml_text = await asyncio.to_thread(
+            _http_get_text,
+            f"{FLEX_BASE_URL}/SendRequest",
+            {"t": token, "q": query_id, "v": "3"},
+            timeout_seconds,
+        )
+        root = ET.fromstring(xml_text)
+        status = _xml_child_text(root, "Status")
+        if status == "Success":
+            return {
+                "reference_code": _xml_child_text(root, "ReferenceCode"),
+                "url": _xml_child_text(root, "Url"),
+                "raw_xml": xml_text,
+            }
+        if status == "Fail":
+            return {
+                "error": _xml_child_text(root, "ErrorMessage") or _xml_child_text(root, "ErrorCode"),
+                "error_code": _xml_child_text(root, "ErrorCode"),
+                "raw_xml": xml_text,
+            }
+        raise ValueError("Unexpected response format from IBKR Flex SendRequest")
+
+    async def _flex_get_statement(
+        self,
+        token: str,
+        reference_code: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        xml_text = await asyncio.to_thread(
+            _http_get_text,
+            f"{FLEX_BASE_URL}/GetStatement",
+            {"t": token, "q": reference_code, "v": "3"},
+            timeout_seconds,
+        )
+        if not xml_text.lstrip().startswith("<"):
+            return {"data": xml_text, "format": "csv"}
+
+        root = ET.fromstring(xml_text)
+        root_name = _strip_xml_namespace(root.tag)
+        if root_name == "FlexQueryResponse":
+            return {"data": xml_text, "format": "xml"}
+
+        status = _xml_child_text(root, "Status")
+        if status == "Success":
+            return {"data": xml_text, "format": "xml"}
+        if status == "Fail":
+            return {
+                "error": _xml_child_text(root, "ErrorMessage") or _xml_child_text(root, "ErrorCode"),
+                "error_code": _xml_child_text(root, "ErrorCode"),
+                "raw_xml": xml_text,
+            }
+        raise ValueError("Unexpected response format from IBKR Flex GetStatement")
+
+    async def _execute_flex_query(
+        self,
+        token: str,
+        query_id: str,
+        max_retries: int,
+        retry_delay_seconds: float,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        send_response = await self._flex_send_request(token, query_id, timeout_seconds)
+        if send_response.get("error"):
+            return send_response
+
+        reference_code = send_response.get("reference_code")
+        if not reference_code:
+            return {"error": "No reference code received from IBKR Flex SendRequest"}
+
+        for attempt in range(1, max_retries + 1):
+            await asyncio.sleep(retry_delay_seconds)
+            statement_response = await self._flex_get_statement(token, reference_code, timeout_seconds)
+            if not statement_response.get("error"):
+                statement_response["reference_code"] = reference_code
+                statement_response["attempts"] = attempt
+                return statement_response
+
+            error = str(statement_response.get("error", ""))
+            error_code = str(statement_response.get("error_code", ""))
+            if error_code == "1019" or "in progress" in error.lower() or "not ready" in error.lower():
+                continue
+            statement_response["reference_code"] = reference_code
+            statement_response["attempts"] = attempt
+            return statement_response
+
+        return {
+            "error": f"Flex statement not ready after {max_retries} retries",
+            "reference_code": reference_code,
+            "error_code": "TIMEOUT",
+        }
+
+    def _parse_flex_trades(
+        self,
+        xml_text: str,
+        start_at: datetime,
+        end_at: datetime,
+        account: str,
+        symbol: str,
+        sec_type: str,
+        side: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        root = ET.fromstring(xml_text)
+        parsed_statement = {
+            "query_name": root.attrib.get("queryName"),
+            "type": root.attrib.get("type"),
+            "flex_statements": [],
+        }
+        trades: list[dict[str, Any]] = []
+
+        for statement in root.iter():
+            if _strip_xml_namespace(statement.tag) != "FlexStatement":
+                continue
+            parsed_statement["flex_statements"].append(dict(statement.attrib))
+
+        for element in root.iter():
+            if _strip_xml_namespace(element.tag) != "Trade":
+                continue
+            row = _xml_to_data(element)
+            trade_time = _parse_flex_trade_datetime(row)
+            if trade_time is not None and not (start_at <= trade_time <= end_at):
+                continue
+            if not _row_matches_text_filter(row, account, ("accountId", "acctId", "account")):
+                continue
+            if not _row_matches_symbol_filter(row, symbol):
+                continue
+            if not _row_matches_text_filter(row, sec_type, ("assetCategory", "secType")):
+                continue
+            if not _row_matches_side_filter(row, side):
+                continue
+
+            row["parsed_trade_time"] = trade_time.isoformat() if trade_time else None
+            trades.append(row)
+
+        trades.sort(key=lambda row: row.get("parsed_trade_time") or "")
+        return parsed_statement, trades
+
+    def _parse_flex_csv_trades(
+        self,
+        csv_text: str,
+        start_at: datetime,
+        end_at: datetime,
+        account: str,
+        symbol: str,
+        sec_type: str,
+        side: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        reader = csv.reader(csv_text.splitlines())
+        statement: dict[str, Any] = {
+            "format": "csv",
+            "sections": [],
+        }
+        current_section: str | None = None
+        headers_by_section: dict[str, list[str]] = {}
+        trades: list[dict[str, Any]] = []
+
+        for raw_row in reader:
+            if not raw_row:
+                continue
+            code = raw_row[0]
+
+            if code == "BOF":
+                statement["account_id"] = raw_row[1] if len(raw_row) > 1 else None
+                statement["query_name"] = raw_row[2] if len(raw_row) > 2 else None
+                statement["from_date"] = raw_row[4] if len(raw_row) > 4 else None
+                statement["to_date"] = raw_row[5] if len(raw_row) > 5 else None
+                continue
+
+            if code == "BOS":
+                current_section = raw_row[1] if len(raw_row) > 1 else None
+                statement["sections"].append({
+                    "code": current_section,
+                    "name": raw_row[2] if len(raw_row) > 2 else None,
+                })
+                continue
+
+            if code == "EOS":
+                current_section = None
+                continue
+
+            if current_section is None:
+                continue
+
+            if current_section not in headers_by_section:
+                headers_by_section[current_section] = raw_row
+                continue
+
+            if current_section != "TRNT":
+                continue
+
+            headers = headers_by_section[current_section]
+            row = {
+                headers[index]: raw_row[index] if index < len(raw_row) else ""
+                for index in range(len(headers))
+            }
+            for key, value in list(row.items()):
+                row.setdefault(_flex_key_to_snake(key), value)
+
+            trade_time = _parse_flex_trade_datetime(row)
+            if trade_time is not None and not (start_at <= trade_time <= end_at):
+                continue
+            if not _row_matches_text_filter(row, account, ("accountId", "ClientAccountID", "account_id", "client_account_id")):
+                continue
+            if not _row_matches_symbol_filter(row, symbol):
+                continue
+            if not _row_matches_text_filter(row, sec_type, ("assetCategory", "AssetClass", "asset_category", "asset_class", "secType")):
+                continue
+            if not _row_matches_side_filter(row, side):
+                continue
+
+            row["parsed_trade_time"] = trade_time.isoformat() if trade_time else None
+            trades.append(row)
+
+        trades.sort(key=lambda row: row.get("parsed_trade_time") or "")
+        return statement, trades
+
     def _register_tools(self) -> None:
         @self.mcp.tool(description="Check whether the MCP can connect read-only to IB Gateway or TWS.")
         async def check_ibkr_connection() -> dict[str, Any]:
@@ -470,6 +939,302 @@ class OptionChainMCP:
                 "requested_account": account or None,
                 "accounts": accounts,
             }
+
+        @self.mcp.tool(
+            description=(
+                "Return read-only IBKR execution/trade history for a requested time window. "
+                "Supports optional account, symbol, security type, exchange, and side filters."
+            )
+        )
+        async def get_trade_history(
+            start_date: Annotated[
+                str,
+                "Start date/time as YYYY-MM-DD, YYYYMMDD, or YYYY-MM-DD HH:MM[:SS].",
+            ],
+            end_date: Annotated[
+                str,
+                "End date/time as YYYY-MM-DD, YYYYMMDD, or YYYY-MM-DD HH:MM[:SS].",
+            ],
+            account: Annotated[
+                str,
+                "Optional IBKR account id. Empty returns all visible accounts.",
+            ] = "",
+            symbol: Annotated[
+                str,
+                "Optional ticker/local symbol filter.",
+            ] = "",
+            sec_type: Annotated[
+                str,
+                "Optional security type filter, e.g. STK, OPT, FUT, CASH.",
+            ] = "",
+            exchange: Annotated[
+                str,
+                "Optional execution exchange filter.",
+            ] = "",
+            side: Annotated[
+                Literal["", "BOT", "SLD"],
+                "Optional execution side filter: BOT or SLD.",
+            ] = "",
+            max_results: Annotated[
+                int,
+                Field(description="Maximum executions returned after client-side filtering", ge=1, le=500),
+            ] = 200,
+        ) -> dict[str, Any]:
+            await self._ensure_connected()
+
+            start_at = _parse_date_or_datetime(start_date, "start")
+            end_at = _parse_date_or_datetime(end_date, "end")
+            if start_at > end_at:
+                raise ValueError("start_date must be earlier than or equal to end_date")
+
+            execution_filter = ib.ExecutionFilter(
+                acctCode=account,
+                time=_format_execution_filter_time(start_at),
+                symbol=symbol.upper().strip(),
+                secType=sec_type.upper().strip(),
+                exchange=exchange.upper().strip(),
+                side=side,
+            )
+
+            if hasattr(self.ib, "reqExecutionsAsync"):
+                fills_raw = await self.ib.reqExecutionsAsync(execution_filter)
+            else:
+                fills_raw = await _maybe_await(self.ib.reqExecutions(execution_filter))
+
+            executions: list[dict[str, Any]] = []
+            for fill in list(fills_raw or []):
+                execution = getattr(fill, "execution", None)
+                contract = getattr(fill, "contract", None)
+                commission_report = getattr(fill, "commissionReport", None)
+
+                execution_time = _parse_execution_time(
+                    getattr(execution, "time", None) or getattr(fill, "time", None)
+                )
+                if execution_time is not None and not (start_at <= execution_time <= end_at):
+                    continue
+
+                executions.append(
+                    {
+                        "time": execution_time.isoformat() if execution_time else None,
+                        "account": getattr(execution, "acctNumber", None),
+                        "exec_id": getattr(execution, "execId", None),
+                        "order_id": getattr(execution, "orderId", None),
+                        "perm_id": getattr(execution, "permId", None),
+                        "client_id": getattr(execution, "clientId", None),
+                        "side": getattr(execution, "side", None),
+                        "shares": _clean_float(getattr(execution, "shares", None)),
+                        "price": _clean_float(getattr(execution, "price", None)),
+                        "avg_price": _clean_float(getattr(execution, "avgPrice", None)),
+                        "cum_qty": _clean_float(getattr(execution, "cumQty", None)),
+                        "last_liquidity": getattr(execution, "lastLiquidity", None),
+                        "exchange": getattr(execution, "exchange", None),
+                        "order_ref": getattr(execution, "orderRef", None),
+                        "contract": _contract_summary(contract),
+                        "commission_report": _commission_report_summary(commission_report),
+                    }
+                )
+
+            executions.sort(key=lambda row: row.get("time") or "")
+            truncated = len(executions) > max_results
+
+            return {
+                "connected": self.ib.isConnected(),
+                "readonly": True,
+                "requested_window": {
+                    "start": start_at.isoformat(),
+                    "end": end_at.isoformat(),
+                },
+                "filters": {
+                    "account": account or None,
+                    "symbol": symbol.upper().strip() or None,
+                    "sec_type": sec_type.upper().strip() or None,
+                    "exchange": exchange.upper().strip() or None,
+                    "side": side or None,
+                },
+                "ib_execution_filter_time": execution_filter.time,
+                "returned_executions": min(len(executions), max_results),
+                "available_executions_after_filter": len(executions),
+                "truncated": truncated,
+                "executions": executions[:max_results],
+                "notes": [
+                    "This tool is read-only and uses IBKR execution reports.",
+                    "IBKR/TWS controls how much execution history is available from the API; older trades may require Flex Queries or statements.",
+                    "The start date is passed to IBKR, while the end date is applied by this MCP after results are returned.",
+                ],
+            }
+
+        @self.mcp.tool(
+            description=(
+                "Return historical trades from an IBKR Flex Query. Requires IB_FLEX_TOKEN "
+                "and either a query_id argument or IB_FLEX_TRADE_QUERY_ID."
+            )
+        )
+        async def get_flex_trade_history(
+            start_date: Annotated[
+                str,
+                "Start date/time to filter returned Flex trades as YYYY-MM-DD, YYYYMMDD, or YYYY-MM-DD HH:MM[:SS].",
+            ],
+            end_date: Annotated[
+                str,
+                "End date/time to filter returned Flex trades as YYYY-MM-DD, YYYYMMDD, or YYYY-MM-DD HH:MM[:SS].",
+            ],
+            query_id: Annotated[
+                str,
+                "Optional IBKR Flex Query ID. Overrides query_period when provided.",
+            ] = "",
+            query_period: Annotated[
+                FlexTradeQueryPeriod,
+                "Named Flex query period: default, last_business_week, ytd, or mtd.",
+            ] = "default",
+            account: Annotated[
+                str,
+                "Optional account id filter applied after the Flex statement is returned.",
+            ] = "",
+            symbol: Annotated[
+                str,
+                "Optional symbol filter applied after the Flex statement is returned.",
+            ] = "",
+            sec_type: Annotated[
+                str,
+                "Optional Flex assetCategory/secType filter, e.g. STK, OPT, FUT.",
+            ] = "",
+            side: Annotated[
+                Literal["", "BOT", "SLD"],
+                "Optional side filter. BOT matches BUY/BOUGHT, SLD matches SELL/SOLD.",
+            ] = "",
+            max_results: Annotated[
+                int,
+                Field(description="Maximum parsed Trade rows returned after filtering", ge=1, le=1000),
+            ] = 500,
+            include_raw_xml: Annotated[
+                bool,
+                "Include the raw Flex XML statement in the response. Avoid unless debugging.",
+            ] = False,
+            max_retries: Annotated[
+                int,
+                Field(description="Maximum GetStatement polling attempts", ge=1, le=20),
+            ] = 10,
+            retry_delay_seconds: Annotated[
+                float,
+                Field(description="Delay between GetStatement polling attempts", ge=0.5, le=10),
+            ] = 2,
+            timeout_seconds: Annotated[
+                float,
+                Field(description="HTTP timeout for each Flex Web Service request", ge=5, le=120),
+            ] = 60,
+        ) -> dict[str, Any]:
+            token = os.getenv("IB_FLEX_TOKEN", "").strip()
+            if not token:
+                raise ValueError(
+                    "IB_FLEX_TOKEN is not configured. Enable Flex Web Service in IBKR "
+                    "Account Management, set IB_FLEX_TOKEN, and restart the MCP container."
+                )
+
+            period_env_names = {
+                "default": "IB_FLEX_TRADE_QUERY_ID",
+                "last_business_week": "IB_FLEX_TRADE_QUERY_ID_LAST_BUSINESS_WEEK",
+                "ytd": "IB_FLEX_TRADE_QUERY_ID_YTD",
+                "mtd": "IB_FLEX_TRADE_QUERY_ID_MTD",
+            }
+            selected_query_id = query_id.strip()
+            selected_period = query_period
+            selected_env_name = None
+            if not selected_query_id:
+                selected_env_name = period_env_names[selected_period]
+                selected_query_id = os.getenv(selected_env_name, "").strip()
+                if not selected_query_id and selected_period != "default":
+                    selected_env_name = period_env_names["default"]
+                    selected_query_id = os.getenv(selected_env_name, "").strip()
+            if not selected_query_id:
+                raise ValueError(
+                    "No Flex Query ID provided. Pass query_id or set IB_FLEX_TRADE_QUERY_ID "
+                    "to a Trade Confirmation / Activity Flex Query ID. Optional named env vars: "
+                    "IB_FLEX_TRADE_QUERY_ID_LAST_BUSINESS_WEEK, IB_FLEX_TRADE_QUERY_ID_YTD, "
+                    "IB_FLEX_TRADE_QUERY_ID_MTD."
+                )
+
+            start_at = _parse_date_or_datetime(start_date, "start")
+            end_at = _parse_date_or_datetime(end_date, "end")
+            if start_at > end_at:
+                raise ValueError("start_date must be earlier than or equal to end_date")
+
+            flex_response = await self._execute_flex_query(
+                token,
+                selected_query_id,
+                max_retries,
+                retry_delay_seconds,
+                timeout_seconds,
+            )
+            if flex_response.get("error"):
+                return {
+                    "success": False,
+                    "source": "ibkr_flex",
+                    "query_id": selected_query_id,
+                    "error": flex_response.get("error"),
+                    "error_code": flex_response.get("error_code"),
+                    "reference_code": flex_response.get("reference_code"),
+                }
+
+            statement_text = str(flex_response.get("data") or "")
+            statement_format = str(flex_response.get("format") or "").lower()
+            if statement_format == "csv" or not statement_text.lstrip().startswith("<"):
+                statement, trades = self._parse_flex_csv_trades(
+                    statement_text,
+                    start_at,
+                    end_at,
+                    account,
+                    symbol,
+                    sec_type,
+                    side,
+                )
+                statement_format = "csv"
+            else:
+                statement, trades = self._parse_flex_trades(
+                    statement_text,
+                    start_at,
+                    end_at,
+                    account,
+                    symbol,
+                    sec_type,
+                    side,
+                )
+                statement_format = "xml"
+            truncated = len(trades) > max_results
+
+            response: dict[str, Any] = {
+                "success": True,
+                "source": "ibkr_flex",
+                "format": statement_format,
+                "readonly": True,
+                "query_id": selected_query_id,
+                "query_period": selected_period,
+                "query_env_name": selected_env_name,
+                "reference_code": flex_response.get("reference_code"),
+                "poll_attempts": flex_response.get("attempts"),
+                "requested_window": {
+                    "start": start_at.isoformat(),
+                    "end": end_at.isoformat(),
+                },
+                "filters": {
+                    "account": account or None,
+                    "symbol": symbol.upper().strip() or None,
+                    "sec_type": sec_type.upper().strip() or None,
+                    "side": side or None,
+                },
+                "statement": statement,
+                "returned_trades": min(len(trades), max_results),
+                "available_trades_after_filter": len(trades),
+                "truncated": truncated,
+                "trades": trades[:max_results],
+                "notes": [
+                    "This tool uses IBKR Flex Web Service, not the TWS reqExecutions endpoint.",
+                    "The Flex Query template in IBKR Account Management controls the actual report period and fields returned.",
+                    "The requested start/end dates are applied by this MCP after the Flex statement is returned.",
+                ],
+            }
+            if include_raw_xml:
+                response["raw_statement"] = statement_text
+            return response
 
         @self.mcp.tool(description="List available option expirations and strike ranges for a stock ticker.")
         async def get_option_chain_summary(

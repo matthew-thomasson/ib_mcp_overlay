@@ -8,6 +8,7 @@ This repository provides a read-only MCP layer for Interactive Brokers so an MCP
 - option prices
 - cash-secured put candidates
 - portfolio positions and cash balances
+- execution/trade history for requested date/time windows through IBKR Flex Web Service
 - IBKR connection status
 
 ## High-Level Flow
@@ -16,9 +17,18 @@ This repository provides a read-only MCP layer for Interactive Brokers so an MCP
 LLM / MCP client
   -> HTTP MCP endpoint on localhost:8010/mcp
   -> Docker container: option_chain_mcp
-  -> ib_async client
+  -> ib_async client for TWS API tools
   -> TWS API on localhost:7496
   -> Interactive Brokers
+
+Historical trade flow:
+
+```text
+LLM / MCP client
+  -> HTTP MCP endpoint on localhost:8010/mcp
+  -> Docker container: option_chain_mcp
+  -> IBKR Flex Web Service over HTTPS
+  -> Interactive Brokers Account Management reports
 ```
 
 ## Key Components
@@ -64,6 +74,8 @@ LLM / MCP client
 
 - `check_ibkr_connection`
 - `get_portfolio_snapshot`
+- `get_flex_trade_history`
+- `get_trade_history`
 - `get_option_chain_summary`
 - `get_option_chain_prices`
 - `find_cash_secured_put_opportunities`
@@ -72,6 +84,8 @@ LLM / MCP client
 
 - The MCP is read-only.
 - It does not place orders.
+- Durable historical trade history is sourced from IBKR Flex Web Service. The Flex Query template controls the report period and fields returned.
+- TWS execution reports are still available through `get_trade_history`, but TWS/Gateway controls whether any execution history is exposed for the API session.
 - Option quote fields such as bid, ask, delta, and implied volatility may be `null` if IBKR has no live or delayed market data for the contract.
 - The scanner normalizes IBKR placeholder values such as `-1` to `null`.
 
