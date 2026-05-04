@@ -10,6 +10,7 @@ This overlay contains local additions for running Interactive Brokers MCP servic
 - Confirmed read-only connection to account `U12024249`.
 - Confirmed portfolio snapshot returns positions and cash balances.
 - Trade history can be retrieved from IBKR Flex Web Service; the TWS execution-report endpoint remains available as a short-window diagnostic fallback.
+- Historical trade analysis is also available through the local Codex skill `ibkr-trade-history`.
 - Confirmed option-chain metadata and cash-secured put scanner return structured JSON.
 - Option bid/ask/delta/IV fields depend on IBKR market-data permissions and market/session availability.
 
@@ -56,7 +57,7 @@ If TWS reports `session expired`, log back in. The MCP does not authenticate to 
 
 ### Run With Docker Compose
 
-The repo keeps non-secret defaults in `.env.shared`, which is safe to sync through git. The Flex token is loaded at runtime from AWS Secrets Manager through the secret id in `IB_FLEX_TOKEN_SECRET_ID`. A local ignored `.env` can still override `.env.shared` for machine-specific settings or temporary testing.
+The repo keeps non-secret defaults in `.env.shared`, which is safe to sync through git and should be committed. The Flex token is loaded at runtime from AWS Secrets Manager through the secret id in `IB_FLEX_TOKEN_SECRET_ID`. A local ignored `.env` can still override `.env.shared` for machine-specific settings or temporary testing.
 
 For a fully local fallback, copy the example environment file and add `IB_FLEX_TOKEN` locally:
 
@@ -229,6 +230,10 @@ Tool:
 ```
 
 Returns TWS execution reports when TWS exposes them for the current API session. In testing, this endpoint returned no historical fills even when trades existed, so use Flex for durable trade history.
+
+### Trade History Skill
+
+The local Codex skill `ibkr-trade-history` keeps a cached ledger of historical Flex trades and uses it to answer questions about recently sold positions, current-price comparisons, and potential re-entry candidates. It refreshes from the Flex trade-history tools, then combines that history with current market data and portfolio state when you ask questions.
 
 ### Draft Cash-Secured Put Order
 
