@@ -11,7 +11,8 @@ These names are the only ones to screen by default. Do not use fixed strikes or 
 - `GLW`
 - `ATI`
 - `QS`
-
+- `AMZN`
+- `NOW`
 ## Selection Rules
 - Use the current underlying price from IBKR before choosing strikes.
 - Only consider expiries that actually exist on the current option chain.
@@ -24,3 +25,21 @@ These names are the only ones to screen by default. Do not use fixed strikes or 
 - Return only the best valid put candidates discovered from the live chain for these tickers.
 - Rank by yield on capital after applying the liquidity and earnings filters.
 - Use the current mid price for any staging preview.
+
+---
+
+## Speculative / Opportunistic Ideas
+
+These ideas were researched at market close and should be re-evaluated at market open for live Bid/Ask pricing before staging any orders.
+
+### AMZN — Cash-Secured Put (Sleep-Well-at-Night Trade)
+- **Strategy:** Sell Put — Cash-Secured
+- **Strike:** $220.00
+- **Expiry:** 2026-07-17 (~73 DTE)
+- **AMZN Price at Research:** ~$273.75
+- **OTM Buffer:** ~19.6% — market must fall nearly 20% before this strike is challenged
+- **Capital Required:** $22,000 (~£16,900) — well within 5% portfolio sizing limit
+- **Open Interest at Research:** 12,126 ✅ (passes liquidity floor of 100)
+- **Earnings Check:** PASS — no AMZN earnings between 2026-05-05 and 2026-07-17
+- **Rationale:** Deploy idle cash from the sweep account to generate yield in excess of the current 3.8% cash rate, with a substantial OTM cushion against an ATH correction. Conservative, high-quality underlying. Only to be staged once live Bid/Ask confirms a Mid-price above $0.20 per share minimum premium threshold.
+- **Action:** Re-run `find_cash_secured_put_opportunities` at market open. If Mid-price ≥ $0.20 and spread ≤ 20% of Mid, proceed to Gate 6 staging.
